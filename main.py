@@ -1,21 +1,50 @@
-from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, MofNCompleteColumn
-import asyncio
-import aiohttp
-import time
-import dbm
-import json
-from dotenv import dotenv_values
+try:
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        TimeElapsedColumn,
+        MofNCompleteColumn,
+    )
+    import asyncio
+    import aiohttp
+    import dbm
+    import json
+    from dotenv import dotenv_values
+    from create_db import create_db
+    from write_json import write_json
+    from write_csv import write_csv
+except:
+    print("Error importing modules. Please install the required modules.")
+    exit()
 
-API_KEY = dotenv_values(".env")["API_KEY"]
+try:
+    API_KEY = dotenv_values(".env")["API_KEY"]
+except:
+    print(
+        "Error loading API key. Please make sure you have a .env file with the API key under 'API_KEY'."
+    )
+    exit()
 
-db = "omdb_data"
-
+ID_PATH = "title.ratings.tsv/data.tsv"
+DB = "db/omdb_data"
 MAX_CONCURRENT_TASKS = 50
 RETRY_COUNT = 3
-MAX_REQUESTS = len(db)
 URL = f"http://www.omdbapi.com/?apikey={API_KEY}&i="
 
-BAD_KEYS = []
+PROGRESS = Progress(
+    SpinnerColumn(),
+    MofNCompleteColumn(),
+    *Progress.get_default_columns(),
+    TimeElapsedColumn(),
+)
+PROG_BAR_DB = PROGRESS.add_task("Loading DB", start=True, total=None)
+PROG_BAR_READ = PROGRESS.add_task("Reading DB", start=False)
+PROG_BAR_REQ = PROGRESS.add_task("Making Requests", start=False)
+PROG_BAR_WRITING_JSON = PROGRESS.add_task("Writing DB to JSON", start=False)
+PROG_BAR_WRITING_CSV = PROGRESS.add_task("Converting JSON to CSV", start=False)
+
+FAILED_ENTRIES = 0
+
 
 def save(db, key, data):
     db[key] = data
@@ -32,7 +61,8 @@ def verify_entry(entry):
     return resp == "True"
 
 
-async def fetch(url, session, count=0):
+async def fetch(key, session, count=0):
+    url = f'{URL}{str(key, "utf-8")}'
     async with session.get(url) as response:
         data = False
         if response.status == 200:
@@ -40,112 +70,94 @@ async def fetch(url, session, count=0):
             if verify_entry(text):
                 data = text
             elif count < RETRY_COUNT:
-                time.sleep(0.05)
-                data = await fetch(url, session, count + 1)
+                data = await fetch(key, session, count + 1)
         elif count < RETRY_COUNT:
-            time.sleep(0.05)
-            data = await fetch(url, session, count + 1)
+            data = await fetch(key, session, count + 1)
         return data
 
 
-async def bound_fetch(sem, url, session, key, db, progress, update_progress):
-    # Getter function with semaphore.
+async def fetch_and_save(sem, session, key, db):
+    global FAILED_ENTRIES
     async with sem:
-        data = await fetch(url, session)
+        data = await fetch(key, session)
         if data:
             save(db, key, data)
         else:
-            # progress.log(f"Error fetching key {key}")
-            BAD_KEYS.append(key)
-        update_progress()
+            FAILED_ENTRIES += 1
+        PROGRESS.update(PROG_BAR_REQ, advance=1)
         return data
 
 
-async def concurrent_scheduler(
-    progress,
-    task_loader_progress_bar,
-    requests_progress_bar,
-    update_task_loader_progress,
-    update_request_progress,
-    db,
-):
-    # use aiohttp
+async def concurrent_scheduler(db):
     sem = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
     async with aiohttp.ClientSession() as session:
+        PROGRESS.log("Reading DB; looking for empty entries...")
+        PROGRESS.start_task(PROG_BAR_READ)
+
         tasks = []
-        skipped = 0
-        progress.log("Loading tasks...")
+        completed_entries = 0
         for key in db.keys():
             if verify_entry(db[key]):
-                skipped += 1
+                completed_entries += 1
             else:  # not yet fetched or bad data
-                url = f'{URL}{str(key, "utf-8")}'
-                tasks.append(
-                    asyncio.create_task(
-                        bound_fetch(
-                            sem,
-                            url,
-                            session,
-                            key,
-                            db,
-                            progress,
-                            update_request_progress,
-                        )
-                    )
-                )
+                tasks.append(asyncio.create_task(fetch_and_save(sem, session, key, db)))
 
-            update_task_loader_progress()
+            PROGRESS.update(PROG_BAR_READ, advance=1)
 
-        progress.log("Running tasks...")
-        progress.log(f"Skipping {skipped} tasks...")
-        progress.update(requests_progress_bar, advance=skipped)
-        progress.start_task(requests_progress_bar)
-        # exit()
+        PROGRESS.log(f"Found {len(db) - completed_entries} empty entries.")
+        PROGRESS.log(f"Filled entries: {completed_entries}/{len(db)}")
+        PROGRESS.log(f"Fetching remaining {len(db) - completed_entries} entries...")
+        PROGRESS.update(PROG_BAR_REQ, advance=completed_entries)
+        PROGRESS.start_task(PROG_BAR_REQ)
+
         await asyncio.gather(*tasks)
 
 
+def load_db():
+    PROGRESS.log("Loading DB...")
+    db = False
+    try:
+        db = dbm.open(DB, "w")
+    except:
+        PROGRESS.log(f"DB '{DB}' not found.")
+    else:
+        PROGRESS.update(PROG_BAR_DB, description="DB loaded", total=100, advance=100)
+        PROGRESS.log("DB loaded.")
+    finally:        
+        PROGRESS.stop_task(PROG_BAR_DB)
+
+    return db
+
+
 if __name__ == "__main__":
+    PROGRESS.__enter__()
+    PROGRESS.log("\n>>>>> STARTING <<<<<\n")
+    
+    db = load_db()
+    if not db:
+        db = create_db(ID_PATH, DB, PROGRESS, PROG_BAR_DB)
 
-    with Progress(
-        SpinnerColumn(),
-        MofNCompleteColumn(),
-        *Progress.get_default_columns(),
-        TimeElapsedColumn(),
-    ) as progress:
-        progress.log("Loading DB...")
-        db_progress_bar = progress.add_task("Loading DB...", start=True, total=None)
-        db = dbm.open("omdb_data", "w")
-        progress.update(
-            db_progress_bar, description="DB loaded", total=100, advance=100
-        )
-        progress.log("DB loaded")
+    PROGRESS.update(PROG_BAR_READ, total=len(db))
+    PROGRESS.update(PROG_BAR_REQ, total=len(db))
+    PROGRESS.update(PROG_BAR_WRITING_JSON, total=len(db))
+    PROGRESS.update(PROG_BAR_WRITING_CSV, total=len(db))
 
-        task_loader_progress_bar = progress.add_task("Loading Tasks", total=len(db))
-        requests_progress_bar = progress.add_task(
-            "Making Requests", total=len(db), start=False
-        )
-        update_task_loader_progress = lambda: progress.update(
-            task_loader_progress_bar, advance=1
-        )
-        update_request_progress = lambda: progress.update(
-            requests_progress_bar, advance=1
-        )
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(concurrent_scheduler(db))
 
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(
-            concurrent_scheduler(
-                progress,
-                task_loader_progress_bar,
-                requests_progress_bar,
-                update_task_loader_progress,
-                update_request_progress,
-                db,
-            )
-        )
+    PROGRESS.log("Completed.")
+    if FAILED_ENTRIES:
+      PROGRESS.log(
+          f"Failed to fetch {FAILED_ENTRIES}/{len(db)} entries - rerun to try again."
+      )
+    else:
+      PROGRESS.log("All entries fetched successfully.")
 
-        with open("bad_keys.txt", "w") as f:
-            for key in BAD_KEYS:
-                f.write(str(key) + "\n")
+    write_json(db, DB, PROGRESS, PROG_BAR_WRITING_JSON)
+    write_csv(DB, PROGRESS, PROG_BAR_WRITING_CSV)
 
-        db.close()
+    db.close()
+
+    PROGRESS.log("\n>>>>> FINISHED <<<<<\n")
+    PROGRESS.__exit__(None, None, None)
