@@ -141,7 +141,6 @@ if __name__ == "__main__":
     PROGRESS.update(PROG_BAR_READ, total=len(db))
     PROGRESS.update(PROG_BAR_REQ, total=len(db))
     PROGRESS.update(PROG_BAR_WRITING_JSON, total=len(db))
-    PROGRESS.update(PROG_BAR_WRITING_CSV, total=len(db))
 
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(concurrent_scheduler(db))
@@ -154,7 +153,9 @@ if __name__ == "__main__":
     else:
       PROGRESS.log("All entries fetched successfully.")
 
-    write_json(db, DB, PROGRESS, PROG_BAR_WRITING_JSON)
+    valid_count = write_json(db, DB, PROGRESS, PROG_BAR_WRITING_JSON)
+
+    PROGRESS.update(PROG_BAR_WRITING_CSV, total=valid_count)
     write_csv(DB, PROGRESS, PROG_BAR_WRITING_CSV)
 
     db.close()

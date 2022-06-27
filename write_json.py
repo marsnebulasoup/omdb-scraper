@@ -1,7 +1,9 @@
 import simplejson as json
 
+VALID_COUNT = 0
 
 def get_entries(db, progress, progress_bar):
+    global VALID_COUNT
     for key in db.keys():
         try:
             raw_data = db[key].decode("utf-8", "backslashreplace")
@@ -16,12 +18,14 @@ def get_entries(db, progress, progress_bar):
             #   yield json_data
         else:
             if json_data["Response"] == "True":
+                VALID_COUNT += 1
                 yield json_data
 
         progress.update(progress_bar, advance=1)
 
 
 def write_json(db, db_name, progress, progress_bar):
+    global VALID_COUNT
     progress.log("Writing DB to JSON...")
     progress.start_task(progress_bar)
 
@@ -32,3 +36,5 @@ def write_json(db, db_name, progress, progress_bar):
     json_file.close()
 
     progress.log("DB written to JSON.")
+
+    return VALID_COUNT
